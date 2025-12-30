@@ -17,12 +17,15 @@
 import bisect
 import glob
 import os
+
 import numpy as np
 import trimesh
+from numba import njit
+from skimage import color as skimage_color
+from sklearn.linear_model import LinearRegression, RANSACRegressor
+
 from loop_utils.alignment_torch import robust_weighted_estimate_sim3_torch
 from loop_utils.alignment_triton import robust_weighted_estimate_sim3_triton
-from numba import njit
-from sklearn.linear_model import LinearRegression, RANSACRegressor
 
 
 def accumulate_sim3_transforms(transforms):
@@ -137,7 +140,9 @@ def apply_sim3_direct(point_maps, s, R, t):
     return transformed
 
 
-def compute_alignment_error(point_map1, conf1, point_map2, conf2, conf_threshold, s, R, t):
+def compute_alignment_error(
+    point_map1, conf1, point_map2, conf2, conf_threshold, s, R, t
+):
     """
     Compute the average point alignment error (using only original inputs)
 
@@ -235,7 +240,13 @@ def save_confident_pointcloud(
 
 
 def save_confident_pointcloud_batch(
-    points, colors, confs, output_path, conf_threshold, sample_ratio=1.0, batch_size=1000000
+    points,
+    colors,
+    confs,
+    output_path,
+    conf_threshold,
+    sample_ratio=1.0,
+    batch_size=1000000,
 ):
     """
     - points: np.ndarray,  (b, H, W, 3) / (N, 3)
@@ -264,7 +275,11 @@ def save_confident_pointcloud_batch(
     num_samples = int(total_valid * sample_ratio) if sample_ratio < 1.0 else total_valid
 
     if num_samples == 0:
-        save_ply(np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8), output_path)
+        save_ply(
+            np.zeros((0, 3), dtype=np.float32),
+            np.zeros((0, 3), dtype=np.uint8),
+            output_path,
+        )
         return
 
     if sample_ratio == 1.0:
@@ -311,12 +326,20 @@ def save_confident_pointcloud_batch(
                     remaining_pts = valid_pts[fill_count:]
                     remaining_cls = valid_cls[fill_count:]
 
-                    count, reservoir_pts, reservoir_clr = optimized_vectorized_reservoir_sampling(
-                        remaining_pts, remaining_cls, count, reservoir_pts, reservoir_clr
+                    count, reservoir_pts, reservoir_clr = (
+                        optimized_vectorized_reservoir_sampling(
+                            remaining_pts,
+                            remaining_cls,
+                            count,
+                            reservoir_pts,
+                            reservoir_clr,
+                        )
                     )
             else:
-                count, reservoir_pts, reservoir_clr = optimized_vectorized_reservoir_sampling(
-                    valid_pts, valid_cls, count, reservoir_pts, reservoir_clr
+                count, reservoir_pts, reservoir_clr = (
+                    optimized_vectorized_reservoir_sampling(
+                        valid_pts, valid_cls, count, reservoir_pts, reservoir_clr
+                    )
                 )
 
         save_ply(reservoir_pts, reservoir_clr, output_path)
@@ -532,7 +555,6 @@ def process_loop_list(chunk_index, loop_list, half_window=10):
 
 
 def compute_sim3_ab(S_a, S_b):
-
     s_a, R_a, T_a = S_a
     s_b, R_b, T_b = S_b
 
@@ -697,7 +719,6 @@ def robust_weighted_estimate_sim3(
     prev_error = float("inf")
 
     for iter in range(max_iters):
-
         transformed = s * (src @ R.T) + t
         residuals = np.linalg.norm(tgt - transformed, axis=1)  # (N,)
         print(f"Residuals: {np.mean(residuals)}")
@@ -802,11 +823,17 @@ def _weighted_estimate_sim3_numba(source_points, target_points, weights):
     return s, mu_src, mu_tgt, H
 
 
-def weighted_estimate_sim3_numba(source_points, target_points, weights, align_method="sim3"):
+def weighted_estimate_sim3_numba(
+    source_points, target_points, weights, align_method="sim3"
+):
     if align_method == "sim3":
-        s, mu_src, mu_tgt, H = _weighted_estimate_sim3_numba(source_points, target_points, weights)
+        s, mu_src, mu_tgt, H = _weighted_estimate_sim3_numba(
+            source_points, target_points, weights
+        )
     elif align_method == "se3" or align_method == "scale+se3":
-        s, mu_src, mu_tgt, H = _weighted_estimate_se3_numba(source_points, target_points, weights)
+        s, mu_src, mu_tgt, H = _weighted_estimate_se3_numba(
+            source_points, target_points, weights
+        )
 
     if s < 0:
         raise ValueError("Total weight too small for meaningful estimation")
@@ -872,7 +899,9 @@ def robust_weighted_estimate_sim3_numba(
     tgt = tgt.astype(np.float32)
     init_weights = init_weights.astype(np.float32)
 
-    s, R, t = weighted_estimate_sim3_numba(src, tgt, init_weights, align_method=align_method)
+    s, R, t = weighted_estimate_sim3_numba(
+        src, tgt, init_weights, align_method=align_method
+    )
 
     prev_error = float("inf")
 
@@ -907,7 +936,6 @@ def robust_weighted_estimate_sim3_numba(
 
 
 def warmup_numba():
-
     print("\nWarming up Numba JIT-compiled functions...")
 
     src = np.random.randn(50000, 3).astype(np.float32)
@@ -996,7 +1024,9 @@ def compute_scale_ransac(
     )
 
     if np.sum(valid_mask) < 100:
-        print(f"Warning: Only {np.sum(valid_mask)} valid points, using default scale 1.0")
+        print(
+            f"Warning: Only {np.sum(valid_mask)} valid points, using default scale 1.0"
+        )
         return 1.0, 0.0
 
     valid_depth1 = depth1_flat[valid_mask]
@@ -1034,7 +1064,13 @@ def compute_scale_ransac(
 
 
 def compute_scale_weighted(
-    depth1, depth2, conf1, conf2, conf_threshold_ratio=0.1, weight_power=2.0, robust_quantile=0.9
+    depth1,
+    depth2,
+    conf1,
+    conf2,
+    conf_threshold_ratio=0.1,
+    weight_power=2.0,
+    robust_quantile=0.9,
 ):
     """
     Args:
@@ -1064,7 +1100,9 @@ def compute_scale_weighted(
     )
 
     if np.sum(valid_mask) < 100:
-        print(f"Warning: Only {np.sum(valid_mask)} valid points, using default scale 1.0")
+        print(
+            f"Warning: Only {np.sum(valid_mask)} valid points, using default scale 1.0"
+        )
         return 1.0, 0.0
 
     valid_depth1 = depth1_flat[valid_mask]
@@ -1088,7 +1126,9 @@ def compute_scale_weighted(
 
     quantile_idx = np.searchsorted(cumulative_weights, robust_quantile)
     scale_quantile = (
-        sorted_ratios[quantile_idx] if quantile_idx < len(sorted_ratios) else scale_median
+        sorted_ratios[quantile_idx]
+        if quantile_idx < len(sorted_ratios)
+        else scale_median
     )
 
     weight_entropy = -np.sum(combined_weights * np.log(combined_weights + 1e-8))
@@ -1118,12 +1158,16 @@ def compute_chunk_scale_advanced(depth1, depth2, conf1, conf2, method="auto"):
 
     elif method == "auto":
         scale_ransac, inlier_ratio = compute_scale_ransac(depth1, depth2, conf1, conf2)
-        scale_weighted, conf_score = compute_scale_weighted(depth1, depth2, conf1, conf2)
+        scale_weighted, conf_score = compute_scale_weighted(
+            depth1, depth2, conf1, conf2
+        )
 
         ransac_quality = inlier_ratio
         weighted_quality = conf_score
 
-        print(f"RANSAC quality: {ransac_quality:.4f}, Weighted quality: {weighted_quality:.4f}")
+        print(
+            f"RANSAC quality: {ransac_quality:.4f}, Weighted quality: {weighted_quality:.4f}"
+        )
 
         if ransac_quality > 0.7 and weighted_quality > 0.7:
             # both method are good, we take both of them by average
@@ -1156,7 +1200,9 @@ def precompute_scale_chunks_with_depth(
         chunk1_depth, chunk2_depth, chunk1_conf, chunk2_conf, method
     )
 
-    print(f"Final scale: {scale_factor:.6f}, quality: {quality_score:.4f}, method: {method_used}")
+    print(
+        f"Final scale: {scale_factor:.6f}, quality: {quality_score:.4f}, method: {method_used}"
+    )
 
     return scale_factor, quality_score, method_used
 
@@ -1164,10 +1210,129 @@ def precompute_scale_chunks_with_depth(
 # ===== Scale precompute end =====
 
 
+def rgb_to_lab(rgb):
+    """
+    Convert RGB colors to LAB color space.
+
+    Args:
+        rgb: [N, 3] numpy array of RGB values (0-255 uint8 or 0-1 float)
+
+    Returns:
+        lab: [N, 3] numpy array of LAB values
+    """
+    # Normalize to 0-1 if uint8
+    if rgb.dtype == np.uint8:
+        rgb = rgb.astype(np.float32) / 255.0
+    elif rgb.max() > 1.0:
+        rgb = rgb.astype(np.float32) / 255.0
+
+    # Reshape for skimage (expects [..., 3])
+    original_shape = rgb.shape
+    rgb_reshaped = rgb.reshape(-1, 3)
+
+    # Convert to LAB
+    lab = skimage_color.rgb2lab(rgb_reshaped.reshape(-1, 1, 3)).reshape(-1, 3)
+
+    return lab.astype(np.float32)
+
+
+def compute_color_similarity(colors1, colors2, color_space="lab"):
+    """
+    Compute color similarity between two sets of colors.
+
+    Args:
+        colors1: [N, 3] numpy array of RGB colors (0-255)
+        colors2: [N, 3] numpy array of RGB colors (0-255)
+        color_space: 'rgb' or 'lab'
+
+    Returns:
+        similarity: [N] numpy array of similarity scores (0-1, higher = more similar)
+    """
+    if color_space == "lab":
+        # Convert to LAB color space (more perceptually uniform)
+        lab1 = rgb_to_lab(colors1)
+        lab2 = rgb_to_lab(colors2)
+
+        # Compute Delta E (color difference in LAB space)
+        # Delta E of ~2.3 is considered "just noticeable difference"
+        delta_e = np.sqrt(np.sum((lab1 - lab2) ** 2, axis=1))
+
+        # Convert to similarity (Delta E typically ranges 0-100+)
+        # Use exponential decay: similarity = exp(-delta_e / scale)
+        # Scale of 20 means Delta E of 20 gives ~37% similarity
+        similarity = np.exp(-delta_e / 20.0)
+
+    else:  # rgb
+        # Normalize RGB to 0-1
+        c1 = colors1.astype(np.float32) / 255.0
+        c2 = colors2.astype(np.float32) / 255.0
+
+        # Compute Euclidean distance in RGB space (max distance = sqrt(3))
+        rgb_dist = np.sqrt(np.sum((c1 - c2) ** 2, axis=1))
+
+        # Convert to similarity (distance ranges 0 to sqrt(3) ≈ 1.73)
+        similarity = 1.0 - (rgb_dist / np.sqrt(3.0))
+
+    return similarity.astype(np.float32)
+
+
+def extract_camera_positions_from_extrinsics(extrinsics):
+    """
+    Extract camera positions in world coordinates from extrinsics (w2c) matrices.
+
+    Args:
+        extrinsics: [N, 3, 4] numpy array of world-to-camera transforms
+
+    Returns:
+        camera_positions: [N, 3] numpy array of camera positions in world coordinates
+    """
+    N = extrinsics.shape[0]
+    # Build 4x4 w2c matrix
+    w2c = np.zeros((N, 4, 4))
+    w2c[:, :3, :4] = extrinsics
+    w2c[:, 3, 3] = 1.0
+
+    # Invert to get c2w
+    c2w = np.linalg.inv(w2c)
+
+    # Camera position is the translation part of c2w
+    camera_positions = c2w[:, :3, 3]
+
+    return camera_positions
+
+
 def weighted_align_point_maps(
-    point_map1, conf1, point_map2, conf2, conf_threshold, config, precompute_scale=None
+    point_map1,
+    conf1,
+    point_map2,
+    conf2,
+    conf_threshold,
+    config,
+    precompute_scale=None,
+    extrinsics1=None,
+    extrinsics2=None,
+    images1=None,
+    images2=None,
 ):
-    """point_map2 -> point_map1"""
+    """
+    Align point_map2 to point_map1 using weighted SIM3/SE3 estimation.
+
+    Args:
+        point_map1: [N, H, W, 3] point cloud from first chunk
+        conf1: [N, H, W] confidence map for first chunk
+        point_map2: [N, H, W, 3] point cloud from second chunk
+        conf2: [N, H, W] confidence map for second chunk
+        conf_threshold: minimum confidence threshold for valid points
+        config: configuration dictionary
+        precompute_scale: optional precomputed scale factor for 'scale+se3' method
+        extrinsics1: [N, 3, 4] optional extrinsics (w2c) for first chunk (for pose-guided alignment)
+        extrinsics2: [N, 3, 4] optional extrinsics (w2c) for second chunk (for pose-guided alignment)
+        images1: [N, H, W, 3] optional RGB images for first chunk (for color-weighted alignment)
+        images2: [N, H, W, 3] optional RGB images for second chunk (for color-weighted alignment)
+
+    Returns:
+        s, R, t: scale, rotation matrix, and translation vector for the alignment
+    """
     b1, _, _, _ = point_map1.shape
     b2, _, _, _ = point_map2.shape
     b = min(b1, b2)
@@ -1175,9 +1340,16 @@ def weighted_align_point_maps(
     if precompute_scale is not None:  # meaning we are using align method 'scale+se3'
         point_map2 *= precompute_scale
 
+    # Check if color-weighted alignment is enabled
+    color_config = config["Model"].get("Color_Weighted_Alignment", {})
+    color_enable = color_config.get("enable", False)
+    use_color = color_enable and images1 is not None and images2 is not None
+
     aligned_points1 = []
     aligned_points2 = []
     confidence_weights = []
+    aligned_colors1 = [] if use_color else None
+    aligned_colors2 = [] if use_color else None
 
     for i in range(b):
         mask1 = conf1[i] > conf_threshold
@@ -1197,6 +1369,13 @@ def weighted_align_point_maps(
         aligned_points2.append(pts2)
         confidence_weights.append(combined_conf)
 
+        # Extract colors for valid points
+        if use_color:
+            clr1 = images1[i][idx]
+            clr2 = images2[i][idx]
+            aligned_colors1.append(clr1)
+            aligned_colors2.append(clr2)
+
     if len(aligned_points1) == 0:
         raise ValueError("No matching point pairs were found!")
 
@@ -1205,6 +1384,87 @@ def weighted_align_point_maps(
     all_weights = np.concatenate(confidence_weights, axis=0)
 
     print(f"The number of corresponding points matched: {all_pts1.shape[0]}")
+
+    # Apply color-weighted alignment if enabled
+    if use_color:
+        all_colors1 = np.concatenate(aligned_colors1, axis=0)
+        all_colors2 = np.concatenate(aligned_colors2, axis=0)
+
+        color_weight = color_config.get("color_weight", 1.0)
+        color_space = color_config.get("color_space", "lab")
+        similarity_threshold = color_config.get("similarity_threshold", 0.3)
+
+        # Compute color similarity
+        color_similarity = compute_color_similarity(
+            all_colors1, all_colors2, color_space=color_space
+        )
+
+        # Filter by similarity threshold
+        valid_color_mask = color_similarity >= similarity_threshold
+        num_filtered = np.sum(~valid_color_mask)
+
+        if num_filtered > 0:
+            print(
+                f"[Color-Weighted Alignment] Filtered {num_filtered} points with color similarity < {similarity_threshold}"
+            )
+
+        # Apply filter
+        all_pts1 = all_pts1[valid_color_mask]
+        all_pts2 = all_pts2[valid_color_mask]
+        all_weights = all_weights[valid_color_mask]
+        color_similarity = color_similarity[valid_color_mask]
+
+        if len(all_pts1) == 0:
+            raise ValueError(
+                "No matching point pairs remain after color filtering! Try lowering similarity_threshold."
+            )
+
+        # Weight by color similarity: boost weights for color-consistent points
+        # weight_modifier = (1 - color_weight) + color_weight * similarity
+        # When color_weight=0: no change. When color_weight=1: fully weighted by similarity
+        weight_modifier = (1.0 - color_weight) + color_weight * color_similarity
+        all_weights = all_weights * weight_modifier
+
+        print(
+            f"[Color-Weighted Alignment] Using {color_space.upper()} color space, weight={color_weight}"
+        )
+        print(
+            f"[Color-Weighted Alignment] Points after filtering: {all_pts1.shape[0]}, "
+            f"mean color similarity: {np.mean(color_similarity):.3f}"
+        )
+
+    # Add pose-guided alignment if enabled
+    pose_guided_config = config["Model"].get("Pose_Guided_Alignment", {})
+    pose_guided_enable = pose_guided_config.get("enable", False)
+
+    if pose_guided_enable and extrinsics1 is not None and extrinsics2 is not None:
+        pose_weight = pose_guided_config.get("pose_weight", 100.0)
+
+        # Extract camera positions from extrinsics
+        cam_pos1 = extract_camera_positions_from_extrinsics(extrinsics1[:b])
+        cam_pos2 = extract_camera_positions_from_extrinsics(extrinsics2[:b])
+
+        # Apply precompute_scale to cam_pos2 if using 'scale+se3' method
+        if precompute_scale is not None:
+            cam_pos2 = cam_pos2 * precompute_scale
+
+        # Compute pose weights - use high weight multiplied by max confidence
+        max_conf = np.max(all_weights) if len(all_weights) > 0 else 1.0
+        pose_weights = np.full(
+            cam_pos1.shape[0], max_conf * pose_weight, dtype=np.float32
+        )
+
+        # Append pose points to the alignment arrays
+        all_pts1 = np.concatenate([all_pts1, cam_pos1], axis=0)
+        all_pts2 = np.concatenate([all_pts2, cam_pos2], axis=0)
+        all_weights = np.concatenate([all_weights, pose_weights], axis=0)
+
+        print(
+            f"[Pose-Guided Alignment] Added {cam_pos1.shape[0]} pose anchor points with weight {pose_weight}x"
+        )
+        print(
+            f"[Pose-Guided Alignment] Total points for alignment: {all_pts1.shape[0]}"
+        )
 
     if config["Model"]["align_lib"] == "numba":
         s, R, t = robust_weighted_estimate_sim3_numba(

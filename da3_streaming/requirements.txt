@@ -5,3 +5,6 @@ einops
 safetensors
 numba
 pypose
+viser
+trimesh
+scipy

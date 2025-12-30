@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 from datetime import datetime
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -141,7 +142,9 @@ class DA3_Streaming:
         self.seed = 42
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.dtype = (
-            torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+            torch.bfloat16
+            if torch.cuda.get_device_capability()[0] >= 8
+            else torch.float16
         )
 
         self.img_dir = image_dir
@@ -216,7 +219,9 @@ class DA3_Streaming:
         elif chunk_idx == len(self.chunk_indices) - 1:
             save_indices = list(range(self.overlap_s, chunk_end - chunk_start))
         else:
-            save_indices = list(range(self.overlap_s, chunk_end - chunk_start - self.overlap_e))
+            save_indices = list(
+                range(self.overlap_s, chunk_end - chunk_start - self.overlap_e)
+            )
 
         print("[save_depth_conf_result] save_indices:")
 
@@ -250,7 +255,9 @@ class DA3_Streaming:
                 )
         print("")
 
-    def process_single_chunk(self, range_1, chunk_idx=None, range_2=None, is_loop=False):
+    def process_single_chunk(
+        self, range_1, chunk_idx=None, range_2=None, is_loop=False
+    ):
         start_idx, end_idx = range_1
         chunk_image_paths = self.img_list[start_idx:end_idx]
         if range_2 is not None:
@@ -270,7 +277,9 @@ class DA3_Streaming:
                 images = chunk_image_paths
                 # images: ['xxx.png', 'xxx.png', ...]
 
-                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy)
+                predictions = self.model.inference(
+                    images, ref_view_strategy=ref_view_strategy
+                )
 
                 predictions.depth = np.squeeze(predictions.depth)
                 predictions.conf -= 1.0
@@ -329,18 +338,23 @@ class DA3_Streaming:
         chunk2_depth,
         chunk1_depth_conf,
         chunk2_depth_conf,
+        extrinsics1=None,
+        extrinsics2=None,
+        images1=None,
+        images2=None,
     ):
-
         conf_threshold = min(np.median(conf1), np.median(conf2)) * 0.1
 
         scale_factor = None
         if self.config["Model"]["align_method"] == "scale+se3":
-            scale_factor_return, quality_score, method_used = precompute_scale_chunks_with_depth(
-                chunk1_depth,
-                chunk1_depth_conf,
-                chunk2_depth,
-                chunk2_depth_conf,
-                method=self.config["Model"]["scale_compute_method"],
+            scale_factor_return, quality_score, method_used = (
+                precompute_scale_chunks_with_depth(
+                    chunk1_depth,
+                    chunk1_depth_conf,
+                    chunk2_depth,
+                    chunk2_depth_conf,
+                    method=self.config["Model"]["scale_compute_method"],
+                )
             )
             print(
                 f"[Depth Scale Precompute] scale: {scale_factor_return}, \
@@ -356,6 +370,10 @@ class DA3_Streaming:
             conf_threshold=conf_threshold,
             config=self.config,
             precompute_scale=scale_factor,
+            extrinsics1=extrinsics1,
+            extrinsics2=extrinsics2,
+            images1=images1,
+            images2=images2,
         )
         print("Estimated Scale:", s)
         print("Estimated Rotation:\n", R)
@@ -405,7 +423,9 @@ class DA3_Streaming:
             conf_a = chunk_data_a.conf[chunk_a_rela_begin:chunk_a_rela_end]
 
             if self.config["Model"]["align_method"] == "scale+se3":
-                chunk_a_depth = np.squeeze(chunk_data_a.depth[chunk_a_rela_begin:chunk_a_rela_end])
+                chunk_a_depth = np.squeeze(
+                    chunk_data_a.depth[chunk_a_rela_begin:chunk_a_rela_end]
+                )
                 chunk_a_depth_conf = np.squeeze(
                     chunk_data_a.conf[chunk_a_rela_begin:chunk_a_rela_end]
                 )
@@ -417,6 +437,14 @@ class DA3_Streaming:
                 chunk_a_depth_conf = None
                 chunk_a_loop_depth_conf = None
 
+            # Get extrinsics for pose-guided alignment
+            extrinsics_a = chunk_data_a.extrinsics[chunk_a_rela_begin:chunk_a_rela_end]
+            extrinsics_loop_a = item[1].extrinsics[chunk_a_s:chunk_a_e]
+
+            # Get images for color-weighted alignment
+            images_a = chunk_data_a.processed_images[chunk_a_rela_begin:chunk_a_rela_end]
+            images_loop_a = item[1].processed_images[chunk_a_s:chunk_a_e]
+
             s_a, R_a, t_a = self.align_2pcds(
                 point_map_a,
                 conf_a,
@@ -426,6 +454,10 @@ class DA3_Streaming:
                 chunk_a_loop_depth,
                 chunk_a_depth_conf,
                 chunk_a_loop_depth_conf,
+                extrinsics1=extrinsics_a,
+                extrinsics2=extrinsics_loop_a,
+                images1=images_a,
+                images2=images_loop_a,
             )
 
             print("chunk_b align")
@@ -447,7 +479,9 @@ class DA3_Streaming:
             conf_b = chunk_data_b.conf[chunk_b_rela_begin:chunk_b_rela_end]
 
             if self.config["Model"]["align_method"] == "scale+se3":
-                chunk_b_depth = np.squeeze(chunk_data_b.depth[chunk_b_rela_begin:chunk_b_rela_end])
+                chunk_b_depth = np.squeeze(
+                    chunk_data_b.depth[chunk_b_rela_begin:chunk_b_rela_end]
+                )
                 chunk_b_depth_conf = np.squeeze(
                     chunk_data_b.conf[chunk_b_rela_begin:chunk_b_rela_end]
                 )
@@ -459,6 +493,14 @@ class DA3_Streaming:
                 chunk_b_depth_conf = None
                 chunk_b_loop_depth_conf = None
 
+            # Get extrinsics for pose-guided alignment
+            extrinsics_b = chunk_data_b.extrinsics[chunk_b_rela_begin:chunk_b_rela_end]
+            extrinsics_loop_b = item[1].extrinsics[chunk_b_s:chunk_b_e]
+
+            # Get images for color-weighted alignment
+            images_b = chunk_data_b.processed_images[chunk_b_rela_begin:chunk_b_rela_end]
+            images_loop_b = item[1].processed_images[chunk_b_s:chunk_b_e]
+
             s_b, R_b, t_b = self.align_2pcds(
                 point_map_b,
                 conf_b,
@@ -468,6 +510,10 @@ class DA3_Streaming:
                 chunk_b_loop_depth,
                 chunk_b_depth_conf,
                 chunk_b_loop_depth_conf,
+                extrinsics1=extrinsics_b,
+                extrinsics2=extrinsics_loop_b,
+                images1=images_b,
+                images2=images_loop_b,
             )
 
             print("a -> b SIM 3")
@@ -544,7 +590,7 @@ class DA3_Streaming:
 
             if chunk_idx > 0:
                 print(
-                    f"Aligning {chunk_idx-1} and {chunk_idx} (Total {len(self.chunk_indices)-1})"
+                    f"Aligning {chunk_idx - 1} and {chunk_idx} (Total {len(self.chunk_indices) - 1})"
                 )
                 chunk_data1 = pre_predictions
                 chunk_data2 = cur_predictions
@@ -572,6 +618,14 @@ class DA3_Streaming:
                     chunk1_depth_conf = None
                     chunk2_depth_conf = None
 
+                # Get extrinsics for pose-guided alignment
+                extrinsics1 = chunk_data1.extrinsics[-self.overlap :]
+                extrinsics2 = chunk_data2.extrinsics[: self.overlap]
+
+                # Get images for color-weighted alignment
+                images1 = chunk_data1.processed_images[-self.overlap :]
+                images2 = chunk_data2.processed_images[: self.overlap]
+
                 s, R, t = self.align_2pcds(
                     point_map1,
                     conf1,
@@ -581,6 +635,10 @@ class DA3_Streaming:
                     chunk2_depth,
                     chunk1_depth_conf,
                     chunk2_depth_conf,
+                    extrinsics1=extrinsics1,
+                    extrinsics2=extrinsics2,
+                    images1=images1,
+                    images2=images2,
                 )
                 self.sim3_list.append((s, R, t))
 
@@ -609,12 +667,16 @@ class DA3_Streaming:
                 self.loop_predict_list.append((item, single_chunk_predictions))
                 print(item)
 
-            self.loop_sim3_list = self.get_loop_sim3_from_loop_predict(self.loop_predict_list)
+            self.loop_sim3_list = self.get_loop_sim3_from_loop_predict(
+                self.loop_predict_list
+            )
 
             input_abs_poses = self.loop_optimizer.sequential_to_absolute_poses(
                 self.sim3_list
             )  # just for plot
-            self.sim3_list = self.loop_optimizer.optimize(self.sim3_list, self.loop_sim3_list)
+            self.sim3_list = self.loop_optimizer.optimize(
+                self.sim3_list, self.loop_sim3_list
+            )
             optimized_abs_poses = self.loop_optimizer.sequential_to_absolute_poses(
                 self.sim3_list
             )  # just for plot
@@ -626,11 +688,13 @@ class DA3_Streaming:
         print("Apply alignment")
         self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
         for chunk_idx in range(len(self.chunk_indices) - 1):
-            print(f"Applying {chunk_idx+1} -> {chunk_idx} (Total {len(self.chunk_indices)-1})")
+            print(
+                f"Applying {chunk_idx + 1} -> {chunk_idx} (Total {len(self.chunk_indices) - 1})"
+            )
             s, R, t = self.sim3_list[chunk_idx]
 
             chunk_data = np.load(
-                os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx+1}.npy"),
+                os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx + 1}.npy"),
                 allow_pickle=True,
             ).item()
 
@@ -646,14 +710,20 @@ class DA3_Streaming:
             aligned_chunk_data["conf"] = chunk_data.conf
             aligned_chunk_data["images"] = chunk_data.processed_images
 
-            aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy")
+            aligned_path = os.path.join(
+                self.result_aligned_dir, f"chunk_{chunk_idx + 1}.npy"
+            )
             np.save(aligned_path, aligned_chunk_data)
 
             if chunk_idx == 0:
                 chunk_data_first = np.load(
-                    os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
+                    os.path.join(self.result_unaligned_dir, "chunk_0.npy"),
+                    allow_pickle=True,
                 ).item()
-                np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
+                np.save(
+                    os.path.join(self.result_aligned_dir, "chunk_0.npy"),
+                    chunk_data_first,
+                )
                 points_first = depth_to_point_cloud_vectorized(
                     chunk_data_first.depth,
                     chunk_data_first.intrinsics,
@@ -669,16 +739,20 @@ class DA3_Streaming:
                     output_path=ply_path_first,
                     conf_threshold=np.mean(confs_first)
                     * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
-                    sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
+                    sample_ratio=self.config["Model"]["Pointcloud_Save"][
+                        "sample_ratio"
+                    ],
                 )
                 if self.config["Model"]["save_depth_conf_result"]:
                     predictions = chunk_data_first
-                    self.save_depth_conf_result(predictions, 0, 1, np.eye(3), np.array([0, 0, 0]))
+                    self.save_depth_conf_result(
+                        predictions, 0, 1, np.eye(3), np.array([0, 0, 0])
+                    )
 
             points = aligned_chunk_data["world_points"].reshape(-1, 3)
             colors = (aligned_chunk_data["images"].reshape(-1, 3)).astype(np.uint8)
             confs = aligned_chunk_data["conf"].reshape(-1)
-            ply_path = os.path.join(self.pcd_dir, f"{chunk_idx+1}_pcd.ply")
+            ply_path = os.path.join(self.pcd_dir, f"{chunk_idx + 1}_pcd.ply")
             save_confident_pointcloud_batch(
                 points=points,  # shape: (H, W, 3)
                 colors=colors,  # shape: (H, W, 3)
@@ -763,7 +837,9 @@ class DA3_Streaming:
                 else chunk_range[1]
             )
 
-            for i, idx in enumerate(range(chunk_range[0] + self.overlap_s, chunk_range_end)):
+            for i, idx in enumerate(
+                range(chunk_range[0] + self.overlap_s, chunk_range_end)
+            ):
                 w2c = np.eye(4)
                 w2c[:3, :] = chunk_extrinsics[i + self.overlap_s]
                 c2w = np.linalg.inv(w2c)
@@ -856,7 +932,7 @@ class DA3_Streaming:
                 os.remove(file_path)
         print("Deleting temp files done.")
 
-        print(f"Saved disk space: {total_space/1024/1024/1024:.4f} GiB")
+        print(f"Saved disk space: {total_space / 1024 / 1024 / 1024:.4f} GiB")
 
 
 def copy_file(src_path, dst_dir):
@@ -878,7 +954,6 @@ def copy_file(src_path, dst_dir):
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description="DA3-Streaming")
     parser.add_argument("--image_dir", type=str, required=True, help="Image path")
     parser.add_argument(
@@ -888,7 +963,9 @@ if __name__ == "__main__":
         default="./configs/base_config.yaml",
         help="Image path",
     )
-    parser.add_argument("--output_dir", type=str, required=False, default=None, help="Output path")
+    parser.add_argument(
+        "--output_dir", type=str, required=False, default=None, help="Output path"
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
