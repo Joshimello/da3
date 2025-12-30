@@ -4,16 +4,16 @@ Weights:
     SALAD: "./weights/dino_salad.ckpt"
 
 Model:
-    chunk_size: 160
-    overlap: 80
-    loop_chunk_size: 30 # imgs of loop chunk = 2 * loop_chunk_size
+    chunk_size: 120
+    overlap: 60
+    loop_chunk_size: 20 # imgs of loop chunk = 2 * loop_chunk_size
     loop_enable: True
     useDBoW: False
     delete_temp_files: True
     align_lib: "triton" # choose among 'triton' (GPU), 'torch' (GPU), 'numba' (CPU) or 'numpy' (CPU)
     align_method: "sim3" # choose among 'sim3', 'se3' or 'scale+se3'
     scale_compute_method: "auto" # choose among 'auto', 'ransac' or 'weighted'. It is used when align_method == 'scale+se3'
-    align_type: "dense" # choose between 'dense' or 'sparse'. Sparse align is constructing, not avaible for now
+    align_type: "sparse" # choose between 'dense' or 'sparse'. Sparse uses feature matching (SIFT/ORB) for more robust alignment
 
     ref_view_strategy: "saddle_balanced" # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
     ref_view_strategy_loop: "saddle_balanced" # 'middle', 'saddle_balanced', 'first' or 'saddle_sim_range'
@@ -23,8 +23,13 @@ Model:
     save_debug_info: False
 
     Sparse_Align:
-        keypoint_select: "orb" # choose among 'orb', 'fast' or 'disk'
-        keypoint_num: 5000
+        feature_method: "orb" # choose among 'sift' or 'orb'
+        max_features: 200 # maximum features to extract per image
+        depth_threshold: 0.1 # minimum depth value to consider valid
+        conf_threshold_ratio: 0.3 # confidence threshold = median(conf) * this ratio
+        ransac_threshold: 0.5 # inlier distance threshold for RANSAC (relative to point cloud scale)
+        ransac_iterations: 2000 # maximum RANSAC iterations
+        min_inliers: 20 # minimum inliers required after RANSAC
 
     IRLS:
         delta: 0.1
@@ -32,11 +37,11 @@ Model:
         tol: 1e-9
 
     Pose_Guided_Alignment:
-        enable: True # Use predicted poses as additional anchor points for alignment
+        enable: False # Use predicted poses as additional anchor points for alignment
         pose_weight: 100.0 # Weight multiplier for pose points (higher = stronger influence)
 
     Color_Weighted_Alignment:
-        enable: True # Use color similarity to weight point correspondences
+        enable: False # Use color similarity to weight point correspondences
         color_weight: 1.0 # Weight multiplier for color similarity (higher = stronger color influence)
         color_space: "lab" # Color space for similarity computation: 'rgb' or 'lab' (LAB is more perceptually uniform)
         similarity_threshold: 0.3 # Minimum color similarity (0-1) to keep a correspondence (lower = more permissive)

@@ -44,6 +44,7 @@ from loop_utils.sim3utils import (
     warmup_numba,
     weighted_align_point_maps,
 )
+from loop_utils.sparse_align import sparse_align_point_maps
 from safetensors.torch import load_file
 
 from depth_anything_3.api import DepthAnything3
@@ -342,6 +343,9 @@ class DA3_Streaming:
         extrinsics2=None,
         images1=None,
         images2=None,
+        intrinsics1=None,
+        intrinsics2=None,
+        alignment_idx=0,
     ):
         conf_threshold = min(np.median(conf1), np.median(conf2)) * 0.1
 
@@ -362,19 +366,48 @@ class DA3_Streaming:
             )
             scale_factor = scale_factor_return
 
-        s, R, t = weighted_align_point_maps(
-            point_map1,
-            conf1,
-            point_map2,
-            conf2,
-            conf_threshold=conf_threshold,
-            config=self.config,
-            precompute_scale=scale_factor,
-            extrinsics1=extrinsics1,
-            extrinsics2=extrinsics2,
-            images1=images1,
-            images2=images2,
-        )
+        # Check alignment type
+        align_type = self.config["Model"].get("align_type", "dense")
+
+        if align_type == "sparse" and images1 is not None and images2 is not None:
+            # Use sparse feature-based alignment
+            print("[Alignment] Using SPARSE feature-based alignment")
+            s, R, t = sparse_align_point_maps(
+                images1=images1,
+                images2=images2,
+                depths1=chunk1_depth if chunk1_depth is not None else np.squeeze(point_map1[..., 2]),
+                depths2=chunk2_depth if chunk2_depth is not None else np.squeeze(point_map2[..., 2]),
+                confs1=conf1,
+                confs2=conf2,
+                intrinsics1=intrinsics1,
+                intrinsics2=intrinsics2,
+                extrinsics1=extrinsics1,
+                extrinsics2=extrinsics2,
+                config=self.config,
+                precompute_scale=scale_factor,
+                save_dir=self.output_dir,
+                alignment_idx=alignment_idx,
+            )
+        else:
+            # Use dense alignment (default)
+            if align_type == "sparse":
+                print("[Alignment] Sparse requested but missing data, falling back to DENSE alignment")
+            else:
+                print("[Alignment] Using DENSE alignment")
+            s, R, t = weighted_align_point_maps(
+                point_map1,
+                conf1,
+                point_map2,
+                conf2,
+                conf_threshold=conf_threshold,
+                config=self.config,
+                precompute_scale=scale_factor,
+                extrinsics1=extrinsics1,
+                extrinsics2=extrinsics2,
+                images1=images1,
+                images2=images2,
+            )
+
         print("Estimated Scale:", s)
         print("Estimated Rotation:\n", R)
         print("Estimated Translation:", t)
@@ -422,20 +455,15 @@ class DA3_Streaming:
             point_map_a = point_map_a[chunk_a_rela_begin:chunk_a_rela_end]
             conf_a = chunk_data_a.conf[chunk_a_rela_begin:chunk_a_rela_end]
 
-            if self.config["Model"]["align_method"] == "scale+se3":
-                chunk_a_depth = np.squeeze(
-                    chunk_data_a.depth[chunk_a_rela_begin:chunk_a_rela_end]
-                )
-                chunk_a_depth_conf = np.squeeze(
-                    chunk_data_a.conf[chunk_a_rela_begin:chunk_a_rela_end]
-                )
-                chunk_a_loop_depth = np.squeeze(item[1].depth[chunk_a_s:chunk_a_e])
-                chunk_a_loop_depth_conf = np.squeeze(item[1].conf[chunk_a_s:chunk_a_e])
-            else:
-                chunk_a_depth = None
-                chunk_a_loop_depth = None
-                chunk_a_depth_conf = None
-                chunk_a_loop_depth_conf = None
+            # Always extract depths (needed for sparse alignment and scale+se3)
+            chunk_a_depth = np.squeeze(
+                chunk_data_a.depth[chunk_a_rela_begin:chunk_a_rela_end]
+            )
+            chunk_a_depth_conf = np.squeeze(
+                chunk_data_a.conf[chunk_a_rela_begin:chunk_a_rela_end]
+            )
+            chunk_a_loop_depth = np.squeeze(item[1].depth[chunk_a_s:chunk_a_e])
+            chunk_a_loop_depth_conf = np.squeeze(item[1].conf[chunk_a_s:chunk_a_e])
 
             # Get extrinsics for pose-guided alignment
             extrinsics_a = chunk_data_a.extrinsics[chunk_a_rela_begin:chunk_a_rela_end]
@@ -444,6 +472,10 @@ class DA3_Streaming:
             # Get images for color-weighted alignment
             images_a = chunk_data_a.processed_images[chunk_a_rela_begin:chunk_a_rela_end]
             images_loop_a = item[1].processed_images[chunk_a_s:chunk_a_e]
+
+            # Get intrinsics for sparse alignment
+            intrinsics_a = chunk_data_a.intrinsics[chunk_a_rela_begin:chunk_a_rela_end]
+            intrinsics_loop_a = item[1].intrinsics[chunk_a_s:chunk_a_e]
 
             s_a, R_a, t_a = self.align_2pcds(
                 point_map_a,
@@ -458,6 +490,9 @@ class DA3_Streaming:
                 extrinsics2=extrinsics_loop_a,
                 images1=images_a,
                 images2=images_loop_a,
+                intrinsics1=intrinsics_a,
+                intrinsics2=intrinsics_loop_a,
+                alignment_idx=1000 + chunk_idx_a,  # Use 1000+ for loop alignments
             )
 
             print("chunk_b align")
@@ -478,20 +513,15 @@ class DA3_Streaming:
             point_map_b = point_map_b[chunk_b_rela_begin:chunk_b_rela_end]
             conf_b = chunk_data_b.conf[chunk_b_rela_begin:chunk_b_rela_end]
 
-            if self.config["Model"]["align_method"] == "scale+se3":
-                chunk_b_depth = np.squeeze(
-                    chunk_data_b.depth[chunk_b_rela_begin:chunk_b_rela_end]
-                )
-                chunk_b_depth_conf = np.squeeze(
-                    chunk_data_b.conf[chunk_b_rela_begin:chunk_b_rela_end]
-                )
-                chunk_b_loop_depth = np.squeeze(item[1].depth[chunk_b_s:chunk_b_e])
-                chunk_b_loop_depth_conf = np.squeeze(item[1].conf[chunk_b_s:chunk_b_e])
-            else:
-                chunk_b_depth = None
-                chunk_b_loop_depth = None
-                chunk_b_depth_conf = None
-                chunk_b_loop_depth_conf = None
+            # Always extract depths (needed for sparse alignment and scale+se3)
+            chunk_b_depth = np.squeeze(
+                chunk_data_b.depth[chunk_b_rela_begin:chunk_b_rela_end]
+            )
+            chunk_b_depth_conf = np.squeeze(
+                chunk_data_b.conf[chunk_b_rela_begin:chunk_b_rela_end]
+            )
+            chunk_b_loop_depth = np.squeeze(item[1].depth[chunk_b_s:chunk_b_e])
+            chunk_b_loop_depth_conf = np.squeeze(item[1].conf[chunk_b_s:chunk_b_e])
 
             # Get extrinsics for pose-guided alignment
             extrinsics_b = chunk_data_b.extrinsics[chunk_b_rela_begin:chunk_b_rela_end]
@@ -500,6 +530,10 @@ class DA3_Streaming:
             # Get images for color-weighted alignment
             images_b = chunk_data_b.processed_images[chunk_b_rela_begin:chunk_b_rela_end]
             images_loop_b = item[1].processed_images[chunk_b_s:chunk_b_e]
+
+            # Get intrinsics for sparse alignment
+            intrinsics_b = chunk_data_b.intrinsics[chunk_b_rela_begin:chunk_b_rela_end]
+            intrinsics_loop_b = item[1].intrinsics[chunk_b_s:chunk_b_e]
 
             s_b, R_b, t_b = self.align_2pcds(
                 point_map_b,
@@ -514,6 +548,9 @@ class DA3_Streaming:
                 extrinsics2=extrinsics_loop_b,
                 images1=images_b,
                 images2=images_loop_b,
+                intrinsics1=intrinsics_b,
+                intrinsics2=intrinsics_loop_b,
+                alignment_idx=2000 + chunk_idx_b,  # Use 2000+ for loop alignments
             )
 
             print("a -> b SIM 3")
@@ -607,16 +644,11 @@ class DA3_Streaming:
                 conf1 = chunk_data1.conf[-self.overlap :]
                 conf2 = chunk_data2.conf[: self.overlap]
 
-                if self.config["Model"]["align_method"] == "scale+se3":
-                    chunk1_depth = np.squeeze(chunk_data1.depth[-self.overlap :])
-                    chunk2_depth = np.squeeze(chunk_data2.depth[: self.overlap])
-                    chunk1_depth_conf = np.squeeze(chunk_data1.conf[-self.overlap :])
-                    chunk2_depth_conf = np.squeeze(chunk_data2.conf[: self.overlap])
-                else:
-                    chunk1_depth = None
-                    chunk2_depth = None
-                    chunk1_depth_conf = None
-                    chunk2_depth_conf = None
+                # Always extract depths (needed for sparse alignment and scale+se3)
+                chunk1_depth = np.squeeze(chunk_data1.depth[-self.overlap :])
+                chunk2_depth = np.squeeze(chunk_data2.depth[: self.overlap])
+                chunk1_depth_conf = np.squeeze(chunk_data1.conf[-self.overlap :])
+                chunk2_depth_conf = np.squeeze(chunk_data2.conf[: self.overlap])
 
                 # Get extrinsics for pose-guided alignment
                 extrinsics1 = chunk_data1.extrinsics[-self.overlap :]
@@ -625,6 +657,10 @@ class DA3_Streaming:
                 # Get images for color-weighted alignment
                 images1 = chunk_data1.processed_images[-self.overlap :]
                 images2 = chunk_data2.processed_images[: self.overlap]
+
+                # Get intrinsics for sparse alignment
+                intrinsics1 = chunk_data1.intrinsics[-self.overlap :]
+                intrinsics2 = chunk_data2.intrinsics[: self.overlap]
 
                 s, R, t = self.align_2pcds(
                     point_map1,
@@ -639,6 +675,9 @@ class DA3_Streaming:
                     extrinsics2=extrinsics2,
                     images1=images1,
                     images2=images2,
+                    intrinsics1=intrinsics1,
+                    intrinsics2=intrinsics2,
+                    alignment_idx=chunk_idx,
                 )
                 self.sim3_list.append((s, R, t))
 
