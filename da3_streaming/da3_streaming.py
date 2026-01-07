@@ -44,7 +44,7 @@ from loop_utils.sim3utils import (
     warmup_numba,
     weighted_align_point_maps,
 )
-from loop_utils.sparse_align import sparse_align_point_maps
+from loop_utils.sparse_align import sparse_align_point_maps, apply_global_transforms_to_sparse_points
 from safetensors.torch import load_file
 
 from depth_anything_3.api import DepthAnything3
@@ -809,6 +809,13 @@ class DA3_Streaming:
 
         self.save_camera_poses()
 
+        # Apply global transforms to sparse alignment points
+        if self.config["Model"].get("align_type", "dense") == "sparse":
+            sparse_align_dir = os.path.join(self.output_dir, "sparse_align")
+            if os.path.exists(sparse_align_dir):
+                print("Applying global transforms to sparse alignment points...")
+                apply_global_transforms_to_sparse_points(sparse_align_dir, self.sim3_list)
+
         print("Done.")
 
     def run(self):
@@ -816,6 +823,7 @@ class DA3_Streaming:
         self.img_list = sorted(
             glob.glob(os.path.join(self.img_dir, "*.jpg"))
             + glob.glob(os.path.join(self.img_dir, "*.png"))
+            + glob.glob(os.path.join(self.img_dir, "*.JPG"))
         )
         # print(self.img_list)
         if len(self.img_list) == 0:

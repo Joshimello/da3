@@ -484,6 +484,214 @@ def save_sparse_points_ply(
         print(f"[Sparse Align] Saved {len(combined_pts)} combined points to {save_path}_combined.ply")
 
 
+def save_sparse_points_with_transform(
+    pts1: np.ndarray,
+    pts2: np.ndarray,
+    weights: np.ndarray,
+    s: float,
+    R: np.ndarray,
+    t: np.ndarray,
+    save_path: str,
+    alignment_idx: int,
+):
+    """
+    Save sparse points with local transformation applied, plus transform metadata.
+
+    The local transformation (s, R, t) transforms pts2 to align with pts1.
+    pts2_transformed = s * R @ pts2 + t
+
+    Args:
+        pts1: [N, 3] points from first chunk (reference)
+        pts2: [N, 3] points from second chunk (to be transformed)
+        weights: [N] confidence weights
+        s: scale factor
+        R: [3, 3] rotation matrix
+        t: [3] translation vector
+        save_path: Base path for saving (without extension)
+        alignment_idx: Index of this alignment
+    """
+    import json
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    # Apply local transformation to pts2
+    pts2_local_aligned = s * (R @ pts2.T).T + t
+
+    # Normalize weights for color mapping
+    if len(weights) > 0:
+        w_min, w_max = weights.min(), weights.max()
+        if w_max > w_min:
+            w_norm = (weights - w_min) / (w_max - w_min)
+        else:
+            w_norm = np.ones_like(weights)
+    else:
+        w_norm = np.array([])
+
+    # Colors for local-aligned: pts1 = cyan, pts2_transformed = magenta
+    colors1 = np.zeros((len(pts1), 4), dtype=np.uint8)
+    colors1[:, 1] = 255  # Green channel
+    colors1[:, 2] = 255  # Blue channel (cyan)
+    colors1[:, 0] = (w_norm * 50).astype(np.uint8)
+    colors1[:, 3] = 255
+
+    colors2 = np.zeros((len(pts2_local_aligned), 4), dtype=np.uint8)
+    colors2[:, 0] = 255  # Red channel
+    colors2[:, 2] = 255  # Blue channel (magenta)
+    colors2[:, 1] = (w_norm * 50).astype(np.uint8)
+    colors2[:, 3] = 255
+
+    # Save pts1 (reference, unchanged)
+    if len(pts1) > 0:
+        pcd1 = trimesh.PointCloud(vertices=pts1, colors=colors1)
+        pcd1.export(f"{save_path}_local_chunk1.ply")
+        print(f"[Sparse Align] Saved {len(pts1)} local-aligned pts1 to {save_path}_local_chunk1.ply")
+
+    # Save pts2 with local transform applied
+    if len(pts2_local_aligned) > 0:
+        pcd2 = trimesh.PointCloud(vertices=pts2_local_aligned, colors=colors2)
+        pcd2.export(f"{save_path}_local_chunk2.ply")
+        print(f"[Sparse Align] Saved {len(pts2_local_aligned)} local-aligned pts2 to {save_path}_local_chunk2.ply")
+
+    # Save combined local-aligned points
+    if len(pts1) > 0 and len(pts2_local_aligned) > 0:
+        combined_pts = np.vstack([pts1, pts2_local_aligned])
+        combined_colors = np.vstack([colors1, colors2])
+        pcd_combined = trimesh.PointCloud(vertices=combined_pts, colors=combined_colors)
+        pcd_combined.export(f"{save_path}_local_combined.ply")
+        print(f"[Sparse Align] Saved {len(combined_pts)} local-aligned combined to {save_path}_local_combined.ply")
+
+    # Save transform metadata as JSON for later global transformation
+    transform_data = {
+        "alignment_idx": alignment_idx,
+        "scale": float(s),
+        "rotation": R.tolist(),
+        "translation": t.tolist(),
+        "num_points": len(pts1),
+    }
+
+    transform_path = f"{save_path}_transform.json"
+    with open(transform_path, 'w') as f:
+        json.dump(transform_data, f, indent=2)
+    print(f"[Sparse Align] Saved transform metadata to {transform_path}")
+
+
+def apply_global_transforms_to_sparse_points(
+    sparse_align_dir: str,
+    accumulated_sim3_list: list,
+):
+    """
+    Apply accumulated global transforms to sparse alignment points.
+
+    This should be called after all alignments are complete and LM optimization is done.
+
+    For alignment_idx i (aligning chunk i-1 with chunk i):
+    - pts1 from chunk i-1: apply accumulated_sim3_list[i-2] (identity if i-1 == 0)
+    - pts2 from chunk i: apply accumulated_sim3_list[i-1]
+
+    Args:
+        sparse_align_dir: Directory containing sparse alignment PLY files
+        accumulated_sim3_list: List of accumulated (s, R, t) transforms.
+                              accumulated_sim3_list[i] transforms chunk i+1 to global frame.
+    """
+    import glob
+    import json
+    import re
+
+    if not os.path.exists(sparse_align_dir):
+        print(f"[Sparse Align] No sparse alignment directory found at {sparse_align_dir}")
+        return
+
+    # Find all transform JSON files
+    transform_files = sorted(glob.glob(os.path.join(sparse_align_dir, "*_transform.json")))
+
+    for transform_path in transform_files:
+        try:
+            with open(transform_path, 'r') as f:
+                transform_data = json.load(f)
+
+            alignment_idx = transform_data["alignment_idx"]
+
+            # Skip loop alignments (idx >= 1000)
+            if alignment_idx >= 1000:
+                continue
+
+            # Determine which chunks this alignment connects
+            # alignment_idx i connects chunk (i-1) and chunk i
+            chunk1_idx = alignment_idx - 1  # pts1 is from this chunk
+            chunk2_idx = alignment_idx       # pts2 is from this chunk
+
+            # Get global transforms for each chunk
+            # accumulated_sim3_list[i] transforms chunk i+1 to global
+            # So for chunk k, we need accumulated_sim3_list[k-1] (or identity if k==0)
+
+            if chunk1_idx == 0:
+                s1, R1, t1 = 1.0, np.eye(3), np.zeros(3)
+            else:
+                s1, R1, t1 = accumulated_sim3_list[chunk1_idx - 1]
+                R1 = np.array(R1) if not isinstance(R1, np.ndarray) else R1
+                t1 = np.array(t1) if not isinstance(t1, np.ndarray) else t1
+
+            if chunk2_idx - 1 < len(accumulated_sim3_list):
+                s2, R2, t2 = accumulated_sim3_list[chunk2_idx - 1]
+                R2 = np.array(R2) if not isinstance(R2, np.ndarray) else R2
+                t2 = np.array(t2) if not isinstance(t2, np.ndarray) else t2
+            else:
+                print(f"[Sparse Align] Warning: No accumulated transform for chunk {chunk2_idx}")
+                continue
+
+            # Load the post-RANSAC sparse points
+            base_path = transform_path.replace("_transform.json", "")
+            pts1_path = f"{base_path}_post_ransac_chunk1.ply"
+            pts2_path = f"{base_path}_post_ransac_chunk2.ply"
+
+            if not os.path.exists(pts1_path) or not os.path.exists(pts2_path):
+                print(f"[Sparse Align] Warning: Missing PLY files for alignment {alignment_idx}")
+                continue
+
+            # Load points
+            pcd1 = trimesh.load(pts1_path)
+            pcd2 = trimesh.load(pts2_path)
+            pts1 = np.array(pcd1.vertices)
+            pts2 = np.array(pcd2.vertices)
+
+            # Apply global transforms
+            # pts_global = s * R @ pts + t
+            pts1_global = s1 * (R1 @ pts1.T).T + t1
+            pts2_global = s2 * (R2 @ pts2.T).T + t2
+
+            # Colors for global-aligned: pts1 = yellow, pts2 = green
+            colors1 = np.zeros((len(pts1_global), 4), dtype=np.uint8)
+            colors1[:, 0] = 255  # Red
+            colors1[:, 1] = 255  # Green (yellow)
+            colors1[:, 3] = 255
+
+            colors2 = np.zeros((len(pts2_global), 4), dtype=np.uint8)
+            colors2[:, 1] = 255  # Green
+            colors2[:, 3] = 255
+
+            # Save global-aligned points
+            if len(pts1_global) > 0:
+                pcd1_global = trimesh.PointCloud(vertices=pts1_global, colors=colors1)
+                pcd1_global.export(f"{base_path}_global_chunk1.ply")
+                print(f"[Sparse Align] Saved {len(pts1_global)} global-aligned pts1 to {base_path}_global_chunk1.ply")
+
+            if len(pts2_global) > 0:
+                pcd2_global = trimesh.PointCloud(vertices=pts2_global, colors=colors2)
+                pcd2_global.export(f"{base_path}_global_chunk2.ply")
+                print(f"[Sparse Align] Saved {len(pts2_global)} global-aligned pts2 to {base_path}_global_chunk2.ply")
+
+            # Save combined global-aligned
+            if len(pts1_global) > 0 and len(pts2_global) > 0:
+                combined_pts = np.vstack([pts1_global, pts2_global])
+                combined_colors = np.vstack([colors1, colors2])
+                pcd_combined = trimesh.PointCloud(vertices=combined_pts, colors=combined_colors)
+                pcd_combined.export(f"{base_path}_global_combined.ply")
+                print(f"[Sparse Align] Saved {len(combined_pts)} global-aligned combined to {base_path}_global_combined.ply")
+
+        except Exception as e:
+            print(f"[Sparse Align] Error processing {transform_path}: {e}")
+
+
 def sparse_align_point_maps(
     images1: np.ndarray,
     images2: np.ndarray,
@@ -589,6 +797,15 @@ def sparse_align_point_maps(
         # Save post-RANSAC points (inliers only)
         save_sparse_points_ply(pts1_ransac, pts2_ransac, weights_ransac, f"{sparse_save_path}_post_ransac", inlier_mask)
 
+        # Store points for later saving with transforms (will be saved after we compute s, R, t)
+        _sparse_save_context = {
+            'pts1': pts1_ransac.copy(),
+            'pts2': pts2_ransac.copy(),
+            'weights': weights_ransac.copy(),
+            'save_path': sparse_save_path,
+            'alignment_idx': alignment_idx,
+        }
+
     # Use RANSAC filtered points for final estimation
     pts1, pts2, weights = pts1_ransac, pts2_ransac, weights_ransac
 
@@ -651,5 +868,15 @@ def sparse_align_point_maps(
         s = precompute_scale
 
     print(f"[Sparse Align] Completed. Scale: {s:.6f}")
+
+    # Save sparse points with local transformation applied
+    if save_dir is not None:
+        sparse_save_path = os.path.join(save_dir, "sparse_align", f"align_{alignment_idx:03d}")
+        save_sparse_points_with_transform(
+            pts1_ransac, pts2_ransac, weights_ransac,
+            s, R, t,
+            sparse_save_path,
+            alignment_idx,
+        )
 
     return s, R, t
