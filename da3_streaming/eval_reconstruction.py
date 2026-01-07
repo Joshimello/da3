@@ -4,6 +4,7 @@ Evaluation module for computing reconstruction accuracy metrics.
 This module provides:
 1. Accuracy metrics: Chamfer distance, Accuracy, Completeness, F-score
 2. Sim3 transformation utilities for manual alignment
+3. ICP-based Sim3 refinement for fine alignment
 """
 
 import numpy as np
@@ -114,6 +115,191 @@ def compute_nearest_neighbor_distances(
         return compute_nearest_neighbor_distances_cpu(query, target)
 
 
+def find_correspondences(
+    source: np.ndarray,
+    target: np.ndarray,
+    max_distance: float = np.inf,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Find nearest neighbor correspondences between source and target.
+
+    Args:
+        source: [N, 3] source points
+        target: [M, 3] target points
+        max_distance: Maximum correspondence distance
+
+    Returns:
+        source_corr: [K, 3] corresponding source points
+        target_corr: [K, 3] corresponding target points
+        distances: [K] distances between correspondences
+    """
+    tree = cKDTree(target)
+    distances, indices = tree.query(source, k=1)
+
+    # Filter by max distance
+    mask = distances < max_distance
+
+    source_corr = source[mask]
+    target_corr = target[indices[mask]]
+    distances_filtered = distances[mask]
+
+    return source_corr, target_corr, distances_filtered
+
+
+def umeyama_alignment(
+    source: np.ndarray,
+    target: np.ndarray,
+    with_scale: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Compute Sim3 (or SE3) alignment using Umeyama's method.
+
+    Finds (R, t, s) such that: target ≈ s * R @ source + t
+
+    Args:
+        source: [N, 3] source points
+        target: [N, 3] target points (must have same N as source)
+        with_scale: If True, estimate scale; otherwise scale=1
+
+    Returns:
+        R: [3, 3] rotation matrix
+        t: [3] translation vector
+        s: scale factor
+    """
+    assert source.shape == target.shape
+    n, m = source.shape  # n = num points, m = dimension (3)
+
+    # Compute centroids
+    mu_source = np.mean(source, axis=0)
+    mu_target = np.mean(target, axis=0)
+
+    # Center the points
+    source_centered = source - mu_source
+    target_centered = target - mu_target
+
+    # Compute variance of source
+    sigma_source = np.mean(np.sum(source_centered ** 2, axis=1))
+
+    # Compute covariance matrix
+    cov = (target_centered.T @ source_centered) / n
+
+    # SVD
+    U, D, Vt = np.linalg.svd(cov)
+
+    # Handle reflection case
+    S = np.eye(m)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[m-1, m-1] = -1
+
+    # Rotation
+    R = U @ S @ Vt
+
+    # Scale
+    if with_scale:
+        s = np.trace(np.diag(D) @ S) / sigma_source
+    else:
+        s = 1.0
+
+    # Translation
+    t = mu_target - s * (R @ mu_source)
+
+    return R, t, s
+
+
+def icp_sim3(
+    source: np.ndarray,
+    target: np.ndarray,
+    max_iterations: int = 50,
+    tolerance: float = 1e-6,
+    max_correspondence_distance: float = np.inf,
+    with_scale: bool = True,
+    verbose: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, float, Dict]:
+    """
+    Iterative Closest Point with Sim3 transformation.
+
+    Aligns source to target by iteratively:
+    1. Finding nearest neighbor correspondences
+    2. Estimating Sim3 transformation using Umeyama
+    3. Applying transformation to source
+
+    Args:
+        source: [N, 3] source points (will be transformed to match target)
+        target: [M, 3] target points (reference, stays fixed)
+        max_iterations: Maximum number of ICP iterations
+        tolerance: Convergence tolerance for error change
+        max_correspondence_distance: Maximum distance for valid correspondences
+        with_scale: If True, estimate scale; otherwise scale=1
+        verbose: If True, print progress
+
+    Returns:
+        R: [3, 3] accumulated rotation matrix
+        t: [3] accumulated translation vector
+        s: accumulated scale factor
+        info: Dictionary with convergence information
+    """
+    # Initialize transformation
+    R_total = np.eye(3)
+    t_total = np.zeros(3)
+    s_total = 1.0
+
+    source_transformed = source.copy()
+    prev_error = np.inf
+
+    info = {
+        'iterations': 0,
+        'converged': False,
+        'final_error': np.inf,
+        'errors': [],
+    }
+
+    for i in range(max_iterations):
+        # Find correspondences
+        source_corr, target_corr, distances = find_correspondences(
+            source_transformed, target, max_correspondence_distance
+        )
+
+        if len(source_corr) < 10:
+            if verbose:
+                print(f"[ICP] Iteration {i}: Not enough correspondences ({len(source_corr)})")
+            break
+
+        # Compute mean error
+        mean_error = np.mean(distances)
+        info['errors'].append(mean_error)
+
+        if verbose:
+            print(f"[ICP] Iteration {i}: {len(source_corr)} correspondences, mean error: {mean_error:.6f}")
+
+        # Check convergence
+        if abs(prev_error - mean_error) < tolerance:
+            info['converged'] = True
+            if verbose:
+                print(f"[ICP] Converged at iteration {i}")
+            break
+
+        prev_error = mean_error
+
+        # Estimate transformation for this iteration
+        R, t, s = umeyama_alignment(source_corr, target_corr, with_scale=with_scale)
+
+        # Update total transformation
+        # Combined: target = s_new * R_new @ (s_old * R_old @ source + t_old) + t_new
+        #         = s_new * s_old * R_new @ R_old @ source + s_new * R_new @ t_old + t_new
+        R_total = R @ R_total
+        t_total = s * (R @ t_total) + t
+        s_total = s * s_total
+
+        # Apply transformation to source
+        source_transformed = apply_sim3(source, R_total, t_total, s_total)
+
+        info['iterations'] = i + 1
+
+    info['final_error'] = prev_error
+
+    return R_total, t_total, s_total, info
+
+
 def apply_sim3(
     points: np.ndarray,
     R: np.ndarray,
@@ -133,6 +319,36 @@ def apply_sim3(
         [N, 3] transformed points
     """
     return s * (points @ R.T) + t
+
+
+def rotation_matrix_to_euler(R: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Extract Euler angles (in radians) from rotation matrix.
+
+    Args:
+        R: [3, 3] rotation matrix
+
+    Returns:
+        roll: Rotation around X axis
+        pitch: Rotation around Y axis
+        yaw: Rotation around Z axis
+    """
+    # Handle gimbal lock cases
+    if abs(R[2, 0]) >= 1.0 - 1e-6:
+        # Gimbal lock
+        yaw = 0.0
+        if R[2, 0] < 0:
+            pitch = np.pi / 2
+            roll = np.arctan2(R[0, 1], R[0, 2])
+        else:
+            pitch = -np.pi / 2
+            roll = np.arctan2(-R[0, 1], -R[0, 2])
+    else:
+        pitch = np.arcsin(-R[2, 0])
+        roll = np.arctan2(R[2, 1] / np.cos(pitch), R[2, 2] / np.cos(pitch))
+        yaw = np.arctan2(R[1, 0] / np.cos(pitch), R[0, 0] / np.cos(pitch))
+
+    return roll, pitch, yaw
 
 
 def rotation_matrix_from_euler(roll: float, pitch: float, yaw: float) -> np.ndarray:

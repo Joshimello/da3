@@ -12,7 +12,9 @@ from eval_reconstruction import (
     compute_accuracy_metrics,
     apply_sim3,
     rotation_matrix_from_euler,
+    rotation_matrix_to_euler,
     load_point_cloud,
+    icp_sim3,
 )
 
 
@@ -81,8 +83,14 @@ def main():
     server.gui.add_markdown("#### Scale")
     gt_scale_slider = server.gui.add_slider("Scale", min=0.01, max=10.0, step=0.01, initial_value=1.0)
 
-    # Reset button
+    # Buttons
     reset_gt_button = server.gui.add_button("Reset GT Transform")
+    refine_alignment_button = server.gui.add_button("Refine Alignment (ICP)")
+
+    # ICP settings
+    server.gui.add_markdown("#### ICP Settings")
+    icp_iterations_slider = server.gui.add_slider("ICP Max Iterations", min=10, max=200, step=10, initial_value=50)
+    icp_with_scale_gui = server.gui.add_checkbox("Estimate Scale", initial_value=True)
 
     # --- Evaluation Controls ---
     server.gui.add_markdown("---")
@@ -448,6 +456,85 @@ def main():
             gt_rz_slider.value = 0.0
             gt_scale_slider.value = 1.0
             update_gt_transform()
+
+        @refine_alignment_button.on_click
+        def _(_):
+            if eval_state['gt_points_original'] is None:
+                results_text.content = "**Error:** No ground truth loaded"
+                return
+
+            if eval_state['reconstruction_points'] is None:
+                results_text.content = "**Error:** No reconstruction loaded"
+                return
+
+            results_text.content = "*Running ICP refinement...*"
+
+            try:
+                # Get current manual transform
+                tx, ty, tz = gt_tx_slider.value, gt_ty_slider.value, gt_tz_slider.value
+                rx, ry, rz = np.radians(gt_rx_slider.value), np.radians(gt_ry_slider.value), np.radians(gt_rz_slider.value)
+                scale = gt_scale_slider.value
+
+                R_manual = rotation_matrix_from_euler(rx, ry, rz)
+                t_manual = np.array([tx, ty, tz])
+
+                # Apply current manual transform to GT as starting point
+                gt_current = apply_sim3(eval_state['gt_points_original'], R_manual, t_manual, scale)
+
+                # Run ICP: align GT to reconstruction
+                # ICP will find transform to move gt_current closer to reconstruction
+                print("[ICP] Running refinement from current manual alignment...")
+                R_icp, t_icp, s_icp, info = icp_sim3(
+                    gt_current,  # source (will be transformed)
+                    eval_state['reconstruction_points'],  # target (fixed)
+                    max_iterations=int(icp_iterations_slider.value),
+                    tolerance=1e-6,
+                    with_scale=icp_with_scale_gui.value,
+                    verbose=True,
+                )
+
+                # Combine transforms: new = ICP @ manual
+                # gt_final = s_icp * R_icp @ (s_manual * R_manual @ gt_orig + t_manual) + t_icp
+                #          = s_icp * s_manual * R_icp @ R_manual @ gt_orig + s_icp * R_icp @ t_manual + t_icp
+                R_combined = R_icp @ R_manual
+                t_combined = s_icp * (R_icp @ t_manual) + t_icp
+                s_combined = s_icp * scale
+
+                # Extract euler angles from combined rotation
+                roll, pitch, yaw = rotation_matrix_to_euler(R_combined)
+
+                # Update sliders (this will trigger update_gt_transform)
+                gt_tx_slider.value = float(t_combined[0])
+                gt_ty_slider.value = float(t_combined[1])
+                gt_tz_slider.value = float(t_combined[2])
+                gt_rx_slider.value = float(np.degrees(roll))
+                gt_ry_slider.value = float(np.degrees(pitch))
+                gt_rz_slider.value = float(np.degrees(yaw))
+                gt_scale_slider.value = float(s_combined)
+
+                # Update GT visualization
+                update_gt_transform()
+
+                results_text.content = f"""
+**ICP Refinement Complete:**
+- Iterations: {info['iterations']}
+- Converged: {info['converged']}
+- Final Error: {info['final_error']:.6f}
+
+**New Transform:**
+- Translation: ({t_combined[0]:.2f}, {t_combined[1]:.2f}, {t_combined[2]:.2f})
+- Rotation: ({np.degrees(roll):.1f}°, {np.degrees(pitch):.1f}°, {np.degrees(yaw):.1f}°)
+- Scale: {s_combined:.4f}
+
+*Click 'Run Evaluation' to compute metrics*
+"""
+                print(f"[ICP] Refinement complete. Iterations: {info['iterations']}, Converged: {info['converged']}")
+
+            except Exception as e:
+                results_text.content = f"**Error:** {str(e)}"
+                print(f"[ICP] Error: {e}")
+                import traceback
+                traceback.print_exc()
 
     elif args.gt_pcd:
         print(f"Warning: Ground truth file not found: {args.gt_pcd}")
