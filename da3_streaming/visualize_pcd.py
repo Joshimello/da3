@@ -14,7 +14,7 @@ from eval_reconstruction import (
     rotation_matrix_from_euler,
     rotation_matrix_to_euler,
     load_point_cloud,
-    icp_sim3,
+    refine_alignment_sim3,
 )
 
 
@@ -87,10 +87,11 @@ def main():
     reset_gt_button = server.gui.add_button("Reset GT Transform")
     refine_alignment_button = server.gui.add_button("Refine Alignment (ICP)")
 
-    # ICP settings
-    server.gui.add_markdown("#### ICP Settings")
-    icp_iterations_slider = server.gui.add_slider("ICP Max Iterations", min=10, max=200, step=10, initial_value=50)
-    icp_with_scale_gui = server.gui.add_checkbox("Estimate Scale", initial_value=True)
+    # Refinement settings
+    server.gui.add_markdown("#### Refinement Settings")
+    refine_with_scale_gui = server.gui.add_checkbox("Estimate Scale (Sim3)", initial_value=True)
+    irls_delta_slider = server.gui.add_slider("IRLS Delta", min=0.01, max=1.0, step=0.01, initial_value=0.1)
+    irls_iters_slider = server.gui.add_slider("IRLS Max Iters", min=5, max=50, step=5, initial_value=20)
 
     # --- Evaluation Controls ---
     server.gui.add_markdown("---")
@@ -467,7 +468,7 @@ def main():
                 results_text.content = "**Error:** No reconstruction loaded"
                 return
 
-            results_text.content = "*Running ICP refinement...*"
+            results_text.content = "*Running IRLS refinement...*"
 
             try:
                 # Get current manual transform
@@ -481,24 +482,25 @@ def main():
                 # Apply current manual transform to GT as starting point
                 gt_current = apply_sim3(eval_state['gt_points_original'], R_manual, t_manual, scale)
 
-                # Run ICP: align GT to reconstruction
-                # ICP will find transform to move gt_current closer to reconstruction
-                print("[ICP] Running refinement from current manual alignment...")
-                R_icp, t_icp, s_icp, info = icp_sim3(
+                # Run IRLS refinement: align GT to reconstruction
+                print("[Refine] Running IRLS refinement from current manual alignment...")
+                align_method = "sim3" if refine_with_scale_gui.value else "se3"
+
+                R_refine, t_refine, s_refine, info = refine_alignment_sim3(
                     gt_current,  # source (will be transformed)
                     eval_state['reconstruction_points'],  # target (fixed)
-                    max_iterations=int(icp_iterations_slider.value),
-                    tolerance=1e-6,
-                    with_scale=icp_with_scale_gui.value,
+                    align_method=align_method,
+                    irls_delta=irls_delta_slider.value,
+                    irls_max_iters=int(irls_iters_slider.value),
                     verbose=True,
                 )
 
-                # Combine transforms: new = ICP @ manual
-                # gt_final = s_icp * R_icp @ (s_manual * R_manual @ gt_orig + t_manual) + t_icp
-                #          = s_icp * s_manual * R_icp @ R_manual @ gt_orig + s_icp * R_icp @ t_manual + t_icp
-                R_combined = R_icp @ R_manual
-                t_combined = s_icp * (R_icp @ t_manual) + t_icp
-                s_combined = s_icp * scale
+                # Combine transforms: new = refine @ manual
+                # gt_final = s_refine * R_refine @ (s_manual * R_manual @ gt_orig + t_manual) + t_refine
+                #          = s_refine * s_manual * R_refine @ R_manual @ gt_orig + s_refine * R_refine @ t_manual + t_refine
+                R_combined = R_refine @ R_manual
+                t_combined = s_refine * (R_refine @ t_manual) + t_refine
+                s_combined = s_refine * scale
 
                 # Extract euler angles from combined rotation
                 roll, pitch, yaw = rotation_matrix_to_euler(R_combined)
@@ -516,10 +518,10 @@ def main():
                 update_gt_transform()
 
                 results_text.content = f"""
-**ICP Refinement Complete:**
-- Iterations: {info['iterations']}
-- Converged: {info['converged']}
-- Final Error: {info['final_error']:.6f}
+**IRLS Refinement Complete:**
+- Correspondences: {info['num_correspondences']}
+- Mean dist before: {info['mean_distance_before']:.6f}
+- Mean dist after: {info['mean_distance_after']:.6f}
 
 **New Transform:**
 - Translation: ({t_combined[0]:.2f}, {t_combined[1]:.2f}, {t_combined[2]:.2f})
@@ -528,11 +530,11 @@ def main():
 
 *Click 'Run Evaluation' to compute metrics*
 """
-                print(f"[ICP] Refinement complete. Iterations: {info['iterations']}, Converged: {info['converged']}")
+                print(f"[Refine] Complete. Correspondences: {info['num_correspondences']}")
 
             except Exception as e:
                 results_text.content = f"**Error:** {str(e)}"
-                print(f"[ICP] Error: {e}")
+                print(f"[Refine] Error: {e}")
                 import traceback
                 traceback.print_exc()
 
